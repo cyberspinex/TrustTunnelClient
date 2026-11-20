@@ -11,7 +11,6 @@ import org.json.JSONArray
 import org.json.JSONObject
 import java.io.File
 import java.io.FileOutputStream
-import java.nio.file.Files
 import java.util.UUID
 
 /** The selection belongs to this Android user and is independent of the server configuration. */
@@ -47,6 +46,8 @@ object AppVpnStore {
             val dir = context.noBackupFilesDir
             val file = File(dir, FILE)
             val marker = File(dir, MARKER)
+            restoreMissing(dir, FILE)
+            restoreMissing(dir, MARKER)
             if (!exists(file)) {
                 if (exists(marker) || !OsConstants.S_ISDIR(Os.stat(dir.path).st_mode)) throw AppVpnException("storage")
                 return AppVpnRules() // First install or upgrade from a version without App VPN.
@@ -107,7 +108,17 @@ object AppVpnStore {
         return saved
     }
 
-    private fun writeAtomic(dir: File, name: String, value: String) {
+    private fun restoreMissing(dir: File, name: String) {
+        val target = File(dir, name)
+        val previous = File(dir, "$name.previous")
+        if (!exists(target) && exists(previous)) {
+            Os.rename(previous.path, target.path)
+            val directory = Os.open(dir.path, OsConstants.O_RDONLY, 0)
+            try { Os.fsync(directory) } finally { Os.close(directory) }
+        }
+    }
+
+    internal fun writeAtomic(dir: File, name: String, value: String, checkpoint: (String) -> Unit = {}) {
         val target = File(dir, name)
         val previous = File(dir, "$name.previous")
         val directory = Os.open(dir.path, OsConstants.O_RDONLY, 0)
@@ -118,20 +129,36 @@ object AppVpnStore {
                     it.write(value.toByteArray(Charsets.UTF_8))
                     it.fd.sync()
                 }
-                if (exists(previous)) Files.delete(previous.toPath())
+                checkpoint("temp")
                 val hadPrevious = exists(target)
-                if (hadPrevious) Os.link(target.path, previous.path)
-                Os.rename(temp.path, target.path)
+                if (hadPrevious) {
+                    // A synced copy keeps the old inode intact until the replacement is durable.
+                    val backup = File.createTempFile("app-vpn-backup-", ".tmp", dir)
+                    try {
+                        FileOutputStream(backup).use { output ->
+                            target.inputStream().use { input -> input.copyTo(output) }
+                            output.fd.sync()
+                        }
+                        Os.rename(backup.path, previous.path)
+                        Os.fsync(directory)
+                    } finally {
+                        backup.delete()
+                    }
+                }
                 try {
+                    checkpoint("backup")
+                    Os.rename(temp.path, target.path)
+                    checkpoint("renamed")
                     Os.fsync(directory)
-                } catch (e: ErrnoException) {
-                    if (hadPrevious) Os.rename(previous.path, target.path) else Files.delete(target.toPath())
+                } catch (e: Exception) {
+                    if (hadPrevious) Os.rename(previous.path, target.path) else if (exists(target)) Os.unlink(target.path)
                     Os.fsync(directory)
                     throw e
                 }
+                // The new file and directory entry are durable. A stale backup is harmless.
+                if (hadPrevious) try { Os.unlink(previous.path) } catch (_: ErrnoException) { }
             } finally {
                 temp.delete()
-                previous.delete()
             }
         } finally {
             Os.close(directory)
