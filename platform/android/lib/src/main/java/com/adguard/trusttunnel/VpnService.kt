@@ -37,12 +37,11 @@ class VpnService : android.net.VpnService(), VpnClientListener {
         private lateinit var networkRequest: NetworkRequest
         private lateinit var networkCallback: NetworkUtils.Companion.NetworkCollector
         private var connectionInfoFile: PersistentRingBuffer? = null
-        private var currentStartId: Int = -1
+        private val singleThread = ThreadManager.create("vpn-service", 1)
 
         private var fileLogger: FileLogger? = null
         private var initialized = false
 
-        private var vpnClient: VpnClient? = null
         @Volatile
         private var configStorage: VpnConfigStorage? = null
         // The last VpnState observed by `onStateChanged`
@@ -53,9 +52,9 @@ class VpnService : android.net.VpnService(), VpnClientListener {
         @Volatile var appVpnStatus = AppVpnStatus()
             private set
 
-        fun reconnectWithAppVpn(context: Context) {
+        fun reconnectWithAppVpn(context: Context, expectedRevision: String) {
             if (appVpnStatus.applied == null || !isPrepared(context)) throw AppVpnException("inactive")
-            context.startForegroundService(getIntent(context, ACTION_APPLY_APP_VPN))
+            context.startForegroundService(getIntent(context, ACTION_APPLY_APP_VPN).putExtra("appVpnRevision", expectedRevision))
         }
 
         private fun publishAppVpn(applied: AppliedAppVpnRules?, error: String? = null) {
@@ -210,6 +209,9 @@ class VpnService : android.net.VpnService(), VpnClientListener {
         }
     }
 
+    private var currentStartId = -1
+    private var vpnClient: VpnClient? = null
+    @Volatile private var destroyed = false
     private var state = State.Stopped
     private var runningConfig: String? = null
     private var runningRecovery = false
@@ -220,6 +222,7 @@ class VpnService : android.net.VpnService(), VpnClientListener {
             val name = intent.data?.schemeSpecificPart ?: return
             val uid = intent.getIntExtra(Intent.EXTRA_UID, -1)
             singleThread.execute {
+                if (destroyed) return@execute
                 val applied = appVpnStatus.applied ?: return@execute
                 if (applied.rules.enabled && (name in applied.rules.packages || uid in applied.installed.values)) {
                     val now = try { AppliedAppVpnRules.resolve(context, applied.rules) } catch (_: AppVpnException) { null }
@@ -241,11 +244,18 @@ class VpnService : android.net.VpnService(), VpnClientListener {
     }
 
     override fun onDestroy() {
+        destroyed = true
         unregisterReceiver(packageReceiver)
+        singleThread.execute {
+            if (vpnClient != null) {
+                closeClient()
+                publishAppVpn(null)
+                onStateChanged(VpnState.DISCONNECTED.code)
+            }
+        }
         super.onDestroy()
     }
 
-    private val singleThread = ThreadManager.create("vpn-service", 1)
     @Volatile
     private var certificateVerificator: CertificateVerificator? = null
 
@@ -268,6 +278,7 @@ class VpnService : android.net.VpnService(), VpnClientListener {
         // We run all payload in another thread (not main) to minimize UI lags
         singleThread.execute {
             try {
+                if (destroyed) return@execute
                 currentStartId = startId
                 val action = intent.action
                 val config = intent.getStringExtra(PARAM_CONFIG)
@@ -275,7 +286,7 @@ class VpnService : android.net.VpnService(), VpnClientListener {
                 when (action) {
                     ACTION_START    -> processStarting(config, intent.getBooleanExtra(PARAM_FALL_INTO_RECOVERY, false), startId)
                     ACTION_STOP     -> close(startId)
-                    ACTION_APPLY_APP_VPN -> reconnect(startId, packageChange = false)
+                    ACTION_APPLY_APP_VPN -> reconnect(startId, packageChange = false, expectedRevision = intent.getStringExtra("appVpnRevision"))
                     else            -> {
                         startNetworkManager(applicationContext)
                         LOG.info("System-triggered start (Always-On VPN), loading persisted config")
@@ -328,7 +339,7 @@ class VpnService : android.net.VpnService(), VpnClientListener {
         val service = this
         val proxyClientListener = object : VpnClientListener by service {
             override fun onStateChanged(state: Int) = singleThread.execute {
-                if (generation != currentGeneration) return@execute
+                if (destroyed || generation != currentGeneration) return@execute
                 val next = VpnState.getByCode(state)
                 LOG.info("VpnService onStateChanged: ${next.name}")
                 if (next == VpnState.DISCONNECTED) close(currentStartId) else service.onStateChanged(state)
@@ -354,7 +365,7 @@ class VpnService : android.net.VpnService(), VpnClientListener {
         publishAppVpn(rules)
     }
 
-    private fun reconnect(startId: Int, packageChange: Boolean) {
+    private fun reconnect(startId: Int, packageChange: Boolean, expectedRevision: String? = null) {
         val config = runningConfig
         if (config == null) {
             close(startId, error = "inactive")
@@ -363,6 +374,7 @@ class VpnService : android.net.VpnService(), VpnClientListener {
         val current = appVpnStatus.applied
         val next = try {
             val desired = if (packageChange) requireNotNull(current).rules else AppVpnStore.read(this)
+            if (!packageChange && desired.revision != expectedRevision) throw AppVpnException("changed")
             AppliedAppVpnRules.resolve(this, desired)
         } catch (e: AppVpnException) {
             // A removed/reassigned UID can invalidate the existing Android interface.
@@ -382,6 +394,7 @@ class VpnService : android.net.VpnService(), VpnClientListener {
     }
 
     override fun onRevoke() = singleThread.execute {
+        if (destroyed) return@execute
         LOG.info("Revoking the VPN service")
         close()
     }
