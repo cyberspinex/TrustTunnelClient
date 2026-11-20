@@ -1,7 +1,7 @@
 plugins {
     alias(libs.plugins.android.library)
     alias(libs.plugins.kotlin.android)
-    kotlin("plugin.serialization") version "2.2.0"
+    alias(libs.plugins.kotlin.serialization)
     id("maven-publish")
 }
 
@@ -32,6 +32,7 @@ fun resolveTtClientVersion(project: Project): String {
 
 val ttClientVersion = resolveTtClientVersion(project)
 version = ttClientVersion
+val prebuiltJniDir = providers.gradleProperty("ttPrebuiltJniDir").orNull
 
 android {
     namespace = "com.adguard.trusttunnel"
@@ -43,12 +44,14 @@ android {
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         consumerProguardFiles("proguard-rules.pro")
-        externalNativeBuild {
-            cmake {
-                targets += "trusttunnel_android"
-                arguments += "-DANDROID_STL=c++_static"
-                arguments += "-DCMAKE_BUILD_TYPE=RelWithDebInfo"
-                arguments += "-DTT_CLIENT_VERSION=$ttClientVersion"
+        if (prebuiltJniDir == null) {
+            externalNativeBuild {
+                cmake {
+                    targets += "trusttunnel_android"
+                    arguments += "-DANDROID_STL=c++_static"
+                    arguments += "-DCMAKE_BUILD_TYPE=RelWithDebInfo"
+                    arguments += "-DTT_CLIENT_VERSION=$ttClientVersion"
+                }
             }
         }
     }
@@ -69,9 +72,13 @@ android {
     kotlinOptions {
         jvmTarget = "11"
     }
-    externalNativeBuild {
-        cmake {
-            path = file("src/main/cpp/CMakeLists.txt")
+    publishing { singleVariant("release") }
+    if (prebuiltJniDir != null) {
+        // Recompile the Android adapter while retaining the matching upstream JNI engine.
+        sourceSets.getByName("main").jniLibs.srcDir(prebuiltJniDir)
+    } else {
+        externalNativeBuild {
+            cmake { path = file("src/main/cpp/CMakeLists.txt") }
         }
     }
 }
