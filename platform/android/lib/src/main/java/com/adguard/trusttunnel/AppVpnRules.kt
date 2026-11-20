@@ -11,6 +11,7 @@ import org.json.JSONArray
 import org.json.JSONObject
 import java.io.File
 import java.io.FileOutputStream
+import java.nio.file.Files
 import java.util.UUID
 
 /** The selection belongs to this Android user and is independent of the server configuration. */
@@ -109,27 +110,30 @@ object AppVpnStore {
     private fun writeAtomic(dir: File, name: String, value: String) {
         val target = File(dir, name)
         val previous = File(dir, "$name.previous")
-        val temp = File.createTempFile("app-vpn-", ".tmp", dir)
-        val directory = Os.open(dir.path, OsConstants.O_RDONLY or OsConstants.O_DIRECTORY, 0)
+        val directory = Os.open(dir.path, OsConstants.O_RDONLY, 0)
         try {
-            FileOutputStream(temp).use {
-                it.write(value.toByteArray(Charsets.UTF_8))
-                it.fd.sync()
-            }
-            if (exists(previous)) Os.unlink(previous.path)
-            val hadPrevious = exists(target)
-            if (hadPrevious) Os.link(target.path, previous.path)
-            Os.rename(temp.path, target.path)
+            val temp = File.createTempFile("app-vpn-", ".tmp", dir)
             try {
-                Os.fsync(directory)
-            } catch (e: ErrnoException) {
-                if (hadPrevious) Os.rename(previous.path, target.path) else Os.unlink(target.path)
-                Os.fsync(directory)
-                throw e
+                FileOutputStream(temp).use {
+                    it.write(value.toByteArray(Charsets.UTF_8))
+                    it.fd.sync()
+                }
+                if (exists(previous)) Files.delete(previous.toPath())
+                val hadPrevious = exists(target)
+                if (hadPrevious) Os.link(target.path, previous.path)
+                Os.rename(temp.path, target.path)
+                try {
+                    Os.fsync(directory)
+                } catch (e: ErrnoException) {
+                    if (hadPrevious) Os.rename(previous.path, target.path) else Files.delete(target.toPath())
+                    Os.fsync(directory)
+                    throw e
+                }
+            } finally {
+                temp.delete()
+                previous.delete()
             }
         } finally {
-            temp.delete()
-            previous.delete()
             Os.close(directory)
         }
     }
