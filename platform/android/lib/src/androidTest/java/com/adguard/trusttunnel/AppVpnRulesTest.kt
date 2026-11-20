@@ -84,7 +84,12 @@ class AppVpnRulesTest {
     @Test
     fun zeroInstalledPackagesOnlyAllowsExclusionMode() {
         val include = AppVpnRules(enabled = true, packages = setOf("com.example.navqs.absent.fixture"))
-        assertEquals("empty", assertThrows(AppVpnException::class.java) { AppliedAppVpnRules.resolve(target, include) }.reason)
-        assertEquals(emptyMap<String, Int>(), AppliedAppVpnRules.resolve(target, include.copy(bypass = true)).installed)
+        val context = object : ContextWrapper(target) {
+            override fun checkSelfPermission(permission: String): Int =
+                if (permission == android.Manifest.permission.QUERY_ALL_PACKAGES) android.content.pm.PackageManager.PERMISSION_GRANTED
+                else super.checkSelfPermission(permission)
+        }
+        assertEquals("empty", assertThrows(AppVpnException::class.java) { AppliedAppVpnRules.resolve(context, include) }.reason)
+        assertEquals(emptyMap<String, Int>(), AppliedAppVpnRules.resolve(context, include.copy(bypass = true)).installed)
     }
 }
