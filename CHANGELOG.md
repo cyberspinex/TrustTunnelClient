@@ -18,6 +18,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Fixed
 
+- Android App VPN rules now save without a hard link and recover the previous file if replacement is interrupted.
+
 ### Security
 
 ## [1.3.0-rc.3] - 2026-11-12
