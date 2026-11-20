@@ -11,6 +11,7 @@ import org.json.JSONArray
 import org.json.JSONObject
 import java.io.File
 import java.io.FileOutputStream
+import java.nio.file.Files
 import java.util.UUID
 
 /** The selection belongs to this Android user and is independent of the server configuration. */
@@ -151,12 +152,12 @@ object AppVpnStore {
                     checkpoint("renamed")
                     Os.fsync(directory)
                 } catch (e: Exception) {
-                    if (hadPrevious) Os.rename(previous.path, target.path) else if (exists(target)) Os.unlink(target.path)
+                    if (hadPrevious) Os.rename(previous.path, target.path) else if (exists(target)) Files.delete(target.toPath())
                     Os.fsync(directory)
                     throw e
                 }
                 // The new file and directory entry are durable. A stale backup is harmless.
-                if (hadPrevious) try { Os.unlink(previous.path) } catch (_: ErrnoException) { }
+                if (hadPrevious) try { Files.delete(previous.toPath()) } catch (_: Exception) { }
             } finally {
                 temp.delete()
             }
